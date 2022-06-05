@@ -37,10 +37,15 @@ public:
     int *cloudNeighborPicked;
     int *cloudLabel;
 
+	/**
+	 * 构造函数 
+	 */
     FeatureExtraction()
     {
+		/* 订阅来自ImageProjection的点云消息 */
         subLaserCloudInfo = nh.subscribe<lio_sam::cloud_info>("lio_sam/deskew/cloud_info", 1, &FeatureExtraction::laserCloudInfoHandler, this, ros::TransportHints().tcpNoDelay());
 
+		/* 按照曲率对点云进行分类，分成Corner和surface两类，并发布 */
         pubLaserCloudInfo = nh.advertise<lio_sam::cloud_info> ("lio_sam/feature/cloud_info", 1);
         pubCornerPoints = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/feature/cloud_corner", 1);
         pubSurfacePoints = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/feature/cloud_surface", 1);
@@ -63,6 +68,9 @@ public:
         cloudLabel = new int[N_SCAN*Horizon_SCAN];
     }
 
+	/**
+	 * 从点云中提取corner和surface特征点，并发布 
+	 */
     void laserCloudInfoHandler(const lio_sam::cloud_infoConstPtr& msgIn)
     {
         cloudInfo = *msgIn; // new cloud info

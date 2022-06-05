@@ -207,9 +207,9 @@ public:
         nh.param<float>("lio_sam/imuGyrBiasN", imuGyrBiasN, 0.00003);
         nh.param<float>("lio_sam/imuGravity", imuGravity, 9.80511);
         nh.param<float>("lio_sam/imuRPYWeight", imuRPYWeight, 0.01);
-        nh.param<vector<double>>("lio_sam/extrinsicRot", extRotV, vector<double>());
-        nh.param<vector<double>>("lio_sam/extrinsicRPY", extRPYV, vector<double>());
-        nh.param<vector<double>>("lio_sam/extrinsicTrans", extTransV, vector<double>());
+        nh.param<vector<double>>("lio_sam/extrinsicRot", extRotV, vector<double>()); //从Lidar到IMU的旋转，即外参
+        nh.param<vector<double>>("lio_sam/extrinsicRPY", extRPYV, vector<double>()); //从Lidar到IMU的位移，即外参
+        nh.param<vector<double>>("lio_sam/extrinsicTrans", extTransV, vector<double>()); //从Lidar到IMU的??，即外参
         extRot = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRotV.data(), 3, 3);
         extRPY = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRPYV.data(), 3, 3);
         extTrans = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extTransV.data(), 3, 1);
@@ -250,6 +250,15 @@ public:
         usleep(100);
     }
 
+    /**
+     * @brief 对IMU数据进行变换，
+     * 
+     * FIXME:似乎是从IMU坐标系变换到Lidar坐标系，但是extRot的配置参数中又提到是从Lidar到IMU的变换
+     * FIXME:还有就是IMU原始数据中的orientation不知道是从哪里来的，反正是个四元数。
+     * 
+     * @param imu_in 
+     * @return sensor_msgs::Imu 
+     */
     sensor_msgs::Imu imuConverter(const sensor_msgs::Imu& imu_in)
     {
         sensor_msgs::Imu imu_out = imu_in;
