@@ -210,6 +210,7 @@ public:
     Eigen::Affine3f incrementalOdometryAffineFront;
     Eigen::Affine3f incrementalOdometryAffineBack;
 
+    /* 基于扫描上下文的回环探测器 */
     // // loop detector 
     SCManager scManager;
 
@@ -446,6 +447,13 @@ public:
         po->intensity = pi->intensity;
     }
 
+    /**
+     * @brief 对点云进行位姿变换
+     * 
+     * @param cloudIn 输入点云
+     * @param transformIn 旋转R和位移t
+     * @return pcl::PointCloud<PointType>::Ptr 变换后的点云
+     */
     pcl::PointCloud<PointType>::Ptr transformPointCloud(pcl::PointCloud<PointType>::Ptr cloudIn, PointTypePose* transformIn)
     {
         pcl::PointCloud<PointType>::Ptr cloudOut(new pcl::PointCloud<PointType>());
@@ -644,7 +652,7 @@ public:
     }
 
     /**
-     * @brief 进行回环闭合
+     * @brief 进行RS回环闭合，即搜索最近点的回环闭合
      * 
      * 1. 在历史点云帧位置中搜索与当前帧距离＜15米，并且时差＞30秒的关键帧作为闭环帧
      * 2. 分别提取当前帧和闭环帧的相邻点云，进行ICP匹配
@@ -766,11 +774,23 @@ public:
     } // performRSLoopClosure
 
 
+    /**
+     * @brief 进行SC回环闭合，即扫描上下文的回环闭合
+     * 
+     * 1. 从SC中获得可能的回环关键帧key，即id；
+     * 2. 根据关键帧key，提取当前帧，回环帧及其相邻帧点云；
+     * 3. 对当前帧和回环帧及其相邻帧进行ICP匹配，取得位姿变换；
+     * 4. 记录以下三项信息，准备后续添加闭环因子到GTSAM优化器：
+     *   a. 关键帧和闭环帧的ID
+     *   b. 关键帧和闭环帧的相对位姿，通过ICP获得
+     *   c. 关键帧和闭环帧的相对位姿测量噪声，使用了常数0.5
+     */
     void performSCLoopClosure()
     {
         if (cloudKeyPoses3D->points.empty() == true)
             return;
 
+        /* 从SC中获得可能的回环关键帧id */
         // find keys
         auto detectResult = scManager.detectLoopClosureID(); // first: nn index, second: yaw diff 
         int loopKeyCur = copy_cloudKeyPoses3D->size() - 1;;
@@ -781,6 +801,7 @@ public:
 
         std::cout << "SC loop found! between " << loopKeyCur << " and " << loopKeyPre << "." << std::endl; // giseop
 
+        /* 提取当前帧以及回环帧点云，当前帧只有一帧，回环帧提取了其两侧各25帧相邻帧，算上回环帧总共是51帧 */
         // extract cloud
         pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr prevKeyframeCloud(new pcl::PointCloud<PointType>());
@@ -789,7 +810,9 @@ public:
             // loopFindNearKeyframes(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum);
 
             int base_key = 0;
+            /* 提取当前帧，不提取相邻帧，不需要位姿变换 */
             loopFindNearKeyframesWithRespectTo(cureKeyframeCloud, loopKeyCur, 0, base_key); // giseop 
+            /* 提取回环帧及其相邻帧，相邻帧左右各25帧，不需要位姿变换 */
             loopFindNearKeyframesWithRespectTo(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum, base_key); // giseop 
 
             if (cureKeyframeCloud->size() < 300 || prevKeyframeCloud->size() < 1000)
@@ -798,6 +821,7 @@ public:
                 publishCloud(&pubHistoryKeyFrames, prevKeyframeCloud, timeLaserInfoStamp, odometryFrame);
         }
 
+        /* 进行ICP之前的参数设置 */
         // ICP Settings
         static pcl::IterativeClosestPoint<PointType, PointType> icp;
         icp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter 
@@ -806,6 +830,7 @@ public:
         icp.setEuclideanFitnessEpsilon(1e-6);
         icp.setRANSACIterations(0);
 
+        /* 以回环帧及其相邻帧为目标，以当前帧为源，进行ICP匹配 */
         // Align clouds
         icp.setInputSource(cureKeyframeCloud);
         icp.setInputTarget(prevKeyframeCloud);
@@ -814,6 +839,7 @@ public:
         // giseop 
         // TODO icp align with initial 
 
+        /* 如果ICP匹配失败直接返回 */
         if (icp.hasConverged() == false || icp.getFitnessScore() > historyKeyframeFitnessScore) {
             std::cout << "ICP fitness test failed (" << icp.getFitnessScore() << " > " << historyKeyframeFitnessScore << "). Reject this SC loop." << std::endl;
             return;
@@ -821,6 +847,7 @@ public:
             std::cout << "ICP fitness test passed (" << icp.getFitnessScore() << " < " << historyKeyframeFitnessScore << "). Add this SC loop." << std::endl;
         }
 
+        /* 用ICP获得的位姿变换将当前帧变换到与回环帧闭合，然后发布当前帧 */
         // publish corrected cloud
         if (pubIcpKeyFrames.getNumSubscribers() != 0)
         {
@@ -829,6 +856,7 @@ public:
             publishCloud(&pubIcpKeyFrames, closed_cloud, timeLaserInfoStamp, odometryFrame);
         }
 
+        /* 取得使回环闭合的位姿变换 */
         // Get pose transformation
         float x, y, z, roll, pitch, yaw;
         Eigen::Affine3f correctionLidarFrame;
@@ -852,6 +880,7 @@ public:
         gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
         gtsam::Pose3 poseTo = Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
 
+        /* 以常数0.5作为噪声，构造噪声模型 */
         // giseop, robust kernel for a SC loop
         float robustNoiseScore = 0.5; // constant is ok...
         gtsam::Vector robustNoiseVector6(6); 
@@ -862,6 +891,7 @@ public:
             gtsam::noiseModel::Diagonal::Variances(robustNoiseVector6)
         ); // - checked it works. but with robust kernel, map modification may be delayed (i.e,. requires more true-positive loop factors)
 
+        /* 保存帧id、位姿变换、噪声模型等，准备后续的深度优化 */
         // Add pose constraint
         mtx.lock();
         loopIndexQueue.push_back(make_pair(loopKeyCur, loopKeyPre));
@@ -1024,6 +1054,18 @@ public:
         *nearKeyframes = *cloud_temp;
     }
 
+    /**
+     * @brief 提取key附近的若干帧关键帧点云
+     * 
+     * 1. 从关键帧序列中找到第Key帧及其两侧的相邻帧点云，位姿变换后叠加在一起。
+     * 2. 所有提取的关键帧都使用相同的位姿进行变换，参数_wrt_key指定使用关键帧位姿序列中的哪一个
+     * 3. 对提取的关键帧点云进行降采样
+     * 
+     * @param nearKeyframes[out] 提取到的若干帧关键点云帧，全部叠加在一起
+     * @param key[in] 关键帧的帧号
+     * @param searchNum[in] 提取相邻点云的数量，例如3表示提取关键帧及其左右两侧各三帧，总共是7帧
+     * @param _wrt_key 对提取的点云进行位姿变换，每个关键帧都有对应的位姿，该参数指定了使用哪个关键帧的位姿
+     */
     void loopFindNearKeyframesWithRespectTo(pcl::PointCloud<PointType>::Ptr& nearKeyframes, const int& key, const int& searchNum, const int _wrt_key)
     {
         // extract near keyframes
@@ -2021,6 +2063,7 @@ public:
         transformTobeMapped[4] = latestEstimate.translation().y();
         transformTobeMapped[5] = latestEstimate.translation().z();
 
+        /* 保存当前帧对应的角点和面点特征点云，作为关键帧点云 */
         // save all the received edge and surf points
         pcl::PointCloud<PointType>::Ptr thisCornerKeyFrame(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr thisSurfKeyFrame(new pcl::PointCloud<PointType>());
@@ -2031,6 +2074,13 @@ public:
         cornerCloudKeyFrames.push_back(thisCornerKeyFrame);
         surfCloudKeyFrames.push_back(thisSurfKeyFrame);
 
+        /**
+         * SC扫描上下文回环探测器，这里将关键帧添加到探测器，有三种选择：
+         * SINGLE_SCAN_FULL：使用降采样的原始点云
+         * SINGLE_SCAN_FEAT：使用面特征点云
+         * MULTI_SCAN_FEAT：使用当前帧及其相邻的25帧点云
+         * 默认使用降采样的原始点云
+         */
         // Scan Context loop detector - giseop
         // - SINGLE_SCAN_FULL: using downsampled original point cloud (/full_cloud_projected + downsampling)
         // - SINGLE_SCAN_FEAT: using surface feature as an input point cloud for scan context (2020.04.01: checked it works.)
@@ -2051,13 +2101,14 @@ public:
             scManager.makeAndSaveScancontextAndKeys(*multiKeyFrameFeatureCloud); 
         }
 
+        /* 保存SC数据到文件中 */
         // save sc data
         const auto& curr_scd = scManager.getConstRefRecentSCD();
         std::string curr_scd_node_idx = padZeros(scManager.polarcontexts_.size() - 1);
 
         saveSCD(saveSCDDirectory + curr_scd_node_idx + ".scd", curr_scd);
 
-
+        /* 将关键帧点云逐帧保存在文件中 */
         // save keyframe cloud as file giseop
         bool saveRawCloud { true };
         pcl::PointCloud<PointType>::Ptr thisKeyFrameCloud(new pcl::PointCloud<PointType>());
